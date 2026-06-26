@@ -64,7 +64,7 @@ class AuthenticationFlowsResourceApiTest extends AbstractTestBase {
         Assertions.assertNotNull(deserialized);
 
         //flows should be prefix with some specific hash
-        String flowBinding = deserialized.get("flowBinding").toString();
+        String flowBinding = deserialized.get("browserFlowBinding").toString();
         String prefix = flowBinding.replace("-Browser flow", "");
         Assertions.assertNotNull(prefix);
 
@@ -125,7 +125,7 @@ class AuthenticationFlowsResourceApiTest extends AbstractTestBase {
         Assertions.assertNotNull(deserialized);
 
         //flows should be prefix with some specific hash
-        String flowBinding = deserialized.get("flowBinding").toString();
+        String flowBinding = deserialized.get("browserFlowBinding").toString();
         String prefix = flowBinding.replace("-Browser flow", "");
         Assertions.assertNotNull(prefix);
 
@@ -154,8 +154,8 @@ class AuthenticationFlowsResourceApiTest extends AbstractTestBase {
         Assertions.assertEquals(totalFlowsCount, flowsCount);
 
         //flows should be prefix with some specific hash
-        var flowBinding1 = deserialized.get("flowBinding");
-        var flowBinding2 = deserialized2.get("flowBinding");
+        var flowBinding1 = deserialized.get("browserFlowBinding");
+        var flowBinding2 = deserialized2.get("browserFlowBinding");
         Assertions.assertEquals(flowBinding1, flowBinding2);
 
         //remove realm
@@ -200,7 +200,7 @@ class AuthenticationFlowsResourceApiTest extends AbstractTestBase {
         Assertions.assertNotNull(deserialized);
 
         //flows should be prefix with some specific hash
-        String flowBinding = deserialized.get("flowBinding").toString();
+        String flowBinding = deserialized.get("browserFlowBinding").toString();
         String prefix = flowBinding.replace("-Browser flow", "");
         Assertions.assertNotNull(prefix);
 
@@ -601,8 +601,8 @@ class AuthenticationFlowsResourceApiTest extends AbstractTestBase {
         Assertions.assertEquals(totalFlowsCount, afterFirstImportFlowsCount + 2);
 
         //flows should be prefix with some specific hash
-        var flowBinding1 = deserialized1.get("flowBinding");
-        var flowBinding2 = deserialized2.get("flowBinding");
+        var flowBinding1 = deserialized1.get("browserFlowBinding");
+        var flowBinding2 = deserialized2.get("browserFlowBinding");
         Assertions.assertNotEquals(flowBinding1, flowBinding2);
 
         //remove realm
@@ -644,7 +644,7 @@ class AuthenticationFlowsResourceApiTest extends AbstractTestBase {
         Assertions.assertNotNull(deserialized);
 
         //browser flow should not be present
-        Assertions.assertFalse(deserialized.has("flowBinding"));
+        Assertions.assertFalse(deserialized.has("browserFlowBinding"));
 
         //remove realm
         keycloak.realms().realm(realmName).remove();
@@ -762,8 +762,8 @@ class AuthenticationFlowsResourceApiTest extends AbstractTestBase {
         Assertions.assertEquals(totalFlowsCount, afterFirstImportFlowsCount + 2);
 
         //flows should be prefix with some specific hash
-        var flowBinding1 = deserialized1.get("flowBinding");
-        var flowBinding2 = deserialized2.get("flowBinding");
+        var flowBinding1 = deserialized1.get("browserFlowBinding");
+        var flowBinding2 = deserialized2.get("browserFlowBinding");
         Assertions.assertNotEquals(flowBinding1, flowBinding2);
 
         //perform a re-import request
@@ -789,7 +789,7 @@ class AuthenticationFlowsResourceApiTest extends AbstractTestBase {
         Assertions.assertEquals(reimportFlowsCount, totalFlowsCount);
 
         //flows should be prefix with the first flow specific hash
-        var flowBinding3 = deserialized3.get("flowBinding");
+        var flowBinding3 = deserialized3.get("browserFlowBinding");
         Assertions.assertEquals(flowBinding1, flowBinding3);
 
         //remove realm

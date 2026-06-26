@@ -166,5 +166,5 @@
       }
     }
   ],
-  "flowBinding": "Not a valid flow"
+  "browserFlowBinding": "Not a valid flow"
 }

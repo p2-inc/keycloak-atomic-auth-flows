@@ -20,7 +20,7 @@ public class AuthenticationFlowPayload {
     private List<AuthenticatorConfigRepresentation> authenticatorConfig;
 
     @Nullable
-    private String flowBinding;
+    private String browserFlowBinding;
     @Nullable
     private ClientFlowPayload clientFlowBinding;
     @Nullable
@@ -79,8 +79,8 @@ public class AuthenticationFlowPayload {
         payload.setAuthenticatorConfig(configList);
 
         //clone flow binding if exists
-        if (requestPayload.getFlowBinding() != null) {
-            payload.setFlowBinding(prefix + requestPayload.getFlowBinding());
+        if (requestPayload.getBrowserFlowBinding() != null) {
+            payload.setBrowserFlowBinding(prefix + requestPayload.getBrowserFlowBinding());
         }
 
         //clone client binding if exists

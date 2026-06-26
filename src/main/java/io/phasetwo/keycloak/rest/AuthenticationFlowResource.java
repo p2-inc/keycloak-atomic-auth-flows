@@ -130,11 +130,11 @@ public class AuthenticationFlowResource {
     }
 
     private static void doBindings(KeycloakSession session, RealmModel realm, AuthenticationFlowPayload payload) {
-        if (payload.getFlowBinding() != null) {
-            var model = realm.getFlowByAlias(payload.getFlowBinding());
+        if (payload.getBrowserFlowBinding() != null) {
+            var model = realm.getFlowByAlias(payload.getBrowserFlowBinding());
             if (model == null) {
-                log.debug("Missing flow with name: {}", payload.getFlowBinding());
-                throw new BadRequestException("Missing flow with name: " + payload.getFlowBinding());
+                log.debug("Missing flow with name: {}", payload.getBrowserFlowBinding());
+                throw new BadRequestException("Missing flow with name: " + payload.getBrowserFlowBinding());
             }
             realm.setBrowserFlow(model);
         }

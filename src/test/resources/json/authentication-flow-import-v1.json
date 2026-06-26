@@ -166,5 +166,5 @@
       }
     }
   ],
-  "flowBinding": "Copy of browser"
+  "browserFlowBinding": "Copy of browser"
 }
