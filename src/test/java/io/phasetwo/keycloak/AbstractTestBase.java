@@ -2,9 +2,14 @@ package io.phasetwo.keycloak;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dasniko.testcontainers.keycloak.KeycloakContainer;
+
+import java.io.File;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 import org.jboss.resteasy.client.jaxrs.ResteasyClient;
 import org.jboss.resteasy.client.jaxrs.internal.ResteasyClientBuilderImpl;
+import org.jboss.shrinkwrap.resolver.api.maven.Maven;
 import org.junit.jupiter.api.BeforeAll;
 import org.keycloak.admin.client.Keycloak;
 import org.keycloak.representations.idm.RealmRepresentation;
@@ -22,7 +27,7 @@ public abstract class AbstractTestBase {
 
   public static final String KEYCLOAK_IMAGE =
       String.format(
-          "quay.io/keycloak/keycloak:%s", System.getProperty("keycloak-version", "26.6.2"));
+              "quay.io/phasetwo/keycloak-crdb:%s", System.getProperty("keycloak-version", "26.5.6"));
   public static final String REALM = "master";
   public static final String ADMIN_CLI = "admin-cli";
 
@@ -35,16 +40,41 @@ public abstract class AbstractTestBase {
       new KeycloakContainer(KEYCLOAK_IMAGE)
           .withContextPath("/auth")
           .withReuse(true)
+          .withExposedPorts(8787, 9000, 8080)
+          .withAccessToHost(true)
           // packages everything under target/classes (including META-INF/services) into a
           // provider jar so the AuthenticationFlowResourceProvider is registered at startup.
           .withProviderClassesFrom("target/classes");
+          // resolves any extra runtime libs the extension needs (listed in `deps`) from the
+          // Maven reactor and drops them into the server's providers/ before `kc.sh build` runs.
+//          .withProviderLibsFrom(getDeps());
 
-  static {
-    container.start();
+  /**
+   * Coordinates ({@code groupId:artifactId}) of runtime dependencies the extension needs inside the
+   * server but that are not part of the base image. Each must be declared in {@code pom.xml} (so its
+   * version is resolvable); resolution is non-transitive, so list every artifact explicitly.
+   */
+  static final String[] deps = {};
+
+  public static List<File> getDeps() {
+    List<File> dependencies = new ArrayList<>();
+    for (String dep : deps) {
+      dependencies.addAll(getDep(dep));
+    }
+    return dependencies;
+  }
+
+  static List<File> getDep(String pkg) {
+    return Maven.resolver()
+        .loadPomFromFile("./pom.xml")
+        .resolve(pkg)
+        .withoutTransitivity()
+        .asList(File.class);
   }
 
   @BeforeAll
   public static void beforeAll() {
+    container.start();
     resteasyClient =
         new ResteasyClientBuilderImpl()
             .disableTrustManager()
