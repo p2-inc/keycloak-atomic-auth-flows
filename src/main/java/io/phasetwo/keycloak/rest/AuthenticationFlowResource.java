@@ -8,7 +8,6 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import lombok.extern.slf4j.Slf4j;
 import org.keycloak.common.util.Base64;
-import org.keycloak.crypto.JavaAlgorithm;
 import org.keycloak.deployment.DeployedConfigurationsManager;
 import org.keycloak.jose.jws.crypto.HashUtils;
 import org.keycloak.migration.migrators.MigrateTo8_0_0;
@@ -249,7 +248,11 @@ public class AuthenticationFlowResource {
             throw new RuntimeException(e);
         }
 
-        byte[] rawCodeHashedAsBytes = HashUtils.hash(JavaAlgorithm.getJavaAlgorithmForHash(NOM_ALGORITHM_TO_HASH),
+        // NOM_ALGORITHM_TO_HASH is already a JCA digest name ("SHA-512"), which HashUtils.hash
+        // passes straight to MessageDigest.getInstance(...). Do NOT route it through
+        // JavaAlgorithm.getJavaAlgorithmForHash(), which expects a JWS signature alg (RS512/HS512/…)
+        // and throws "Unknown algorithm SHA-512" for a raw digest name.
+        byte[] rawCodeHashedAsBytes = HashUtils.hash(NOM_ALGORITHM_TO_HASH,
                 payloadJson.getBytes(StandardCharsets.UTF_8));
 
         var encodedString = Base64.encodeBytes(rawCodeHashedAsBytes, 0, 10);// we might get a error if the length is larger than the database field accepts
