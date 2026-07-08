@@ -1,0 +1,178 @@
+{
+  "authenticationFlows": [
+    {
+      "alias": "demo-browser",
+      "providerId": "basic-flow",
+      "topLevel": true,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticatorFlow": false,
+          "requirement": "ALTERNATIVE",
+          "priority": 10,
+          "autheticatorFlow": false,
+          "userSetupAllowed": false,
+          "authenticator": "auth-cookie"
+        },
+        {
+          "authenticatorFlow": false,
+          "requirement": "ALTERNATIVE",
+          "priority": 25,
+          "autheticatorFlow": false,
+          "userSetupAllowed": false,
+          "authenticator": "identity-provider-redirector"
+        },
+        {
+          "authenticatorFlow": true,
+          "requirement": "ALTERNATIVE",
+          "priority": 30,
+          "autheticatorFlow": true,
+          "userSetupAllowed": false,
+          "flowAlias": "demo-browser-forms"
+        }
+      ],
+      "description": "Demo browser based authentication"
+    },
+    {
+      "alias": "demo-browser-forms",
+      "providerId": "basic-flow",
+      "topLevel": false,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 10,
+          "autheticatorFlow": false,
+          "userSetupAllowed": false,
+          "authenticator": "auth-username-password-form"
+        },
+        {
+          "authenticatorFlow": true,
+          "requirement": "CONDITIONAL",
+          "priority": 20,
+          "autheticatorFlow": true,
+          "userSetupAllowed": false,
+          "flowAlias": "demo-browser-conditional-otp"
+        }
+      ],
+      "description": "Username + password, then conditional OTP"
+    },
+    {
+      "alias": "demo-browser-conditional-otp",
+      "providerId": "basic-flow",
+      "topLevel": false,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 10,
+          "autheticatorFlow": false,
+          "userSetupAllowed": false,
+          "authenticator": "conditional-user-configured"
+        },
+        {
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 20,
+          "autheticatorFlow": false,
+          "userSetupAllowed": false,
+          "authenticator": "auth-otp-form"
+        }
+      ],
+      "description": "Ask for an OTP only when the user has one configured"
+    },
+    {
+      "alias": "demo-first-broker-login",
+      "providerId": "basic-flow",
+      "topLevel": true,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 10,
+          "autheticatorFlow": false,
+          "userSetupAllowed": false,
+          "authenticator": "idp-review-profile",
+          "authenticatorConfig": "demo-review-profile"
+        },
+        {
+          "authenticatorFlow": true,
+          "requirement": "REQUIRED",
+          "priority": 20,
+          "autheticatorFlow": true,
+          "userSetupAllowed": false,
+          "flowAlias": "demo-first-broker-login-user-or-link"
+        }
+      ],
+      "description": "Demo first broker login for the demo-oidc identity provider"
+    },
+    {
+      "alias": "demo-first-broker-login-user-or-link",
+      "providerId": "basic-flow",
+      "topLevel": false,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticatorFlow": false,
+          "requirement": "ALTERNATIVE",
+          "priority": 10,
+          "autheticatorFlow": false,
+          "userSetupAllowed": false,
+          "authenticator": "idp-create-user-if-unique"
+        },
+        {
+          "authenticatorFlow": true,
+          "requirement": "ALTERNATIVE",
+          "priority": 20,
+          "autheticatorFlow": true,
+          "userSetupAllowed": false,
+          "flowAlias": "demo-first-broker-login-link"
+        }
+      ],
+      "description": "Create a new user for a first-time brokered login, or link to an existing one"
+    },
+    {
+      "alias": "demo-first-broker-login-link",
+      "providerId": "basic-flow",
+      "topLevel": false,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 10,
+          "autheticatorFlow": false,
+          "userSetupAllowed": false,
+          "authenticator": "idp-confirm-link"
+        },
+        {
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 20,
+          "autheticatorFlow": false,
+          "userSetupAllowed": false,
+          "authenticator": "idp-email-verification"
+        }
+      ],
+      "description": "Link a brokered identity to an existing account"
+    }
+  ],
+  "authenticatorConfig": [
+    {
+      "alias": "demo-review-profile",
+      "config": {
+        "update.profile.on.first.login": "missing"
+      }
+    }
+  ],
+  "browserFlowBinding": "demo-browser",
+  "idpFlowBindings": [
+    {
+      "alias": "demo-oidc",
+      "firstLoginFlowBinding": "demo-first-broker-login"
+    }
+  ]
+}
