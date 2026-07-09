@@ -10,6 +10,26 @@ the flow aliases are prefixed with that hash, so re-importing an identical
 configuration is detected and rejected (HTTP `409`) instead of silently duplicating
 flows — making the import safe to run repeatedly from a CI/CD pipeline.
 
+## Quick start
+
+Try the extension end-to-end without installing a JDK, Maven, or Keycloak — just
+Docker and Ruby. From the repo root:
+
+```bash
+# Build the extension and start Keycloak (dev mode) with it loaded, plus a
+# minimal `demo` realm. Admin console: http://localhost:8080 (admin / admin)
+docker compose up --build
+
+# In another shell, import the demo authentication flows via the new endpoint:
+ruby examples/scripts/update_auth_flows.rb
+```
+
+Then open the admin console → realm **demo** → *Authentication* to see the
+imported flows and their bindings. The [`examples/`](examples/) directory is a
+full config-as-code walkthrough — a per-realm flow **builder**, the generated
+import payload, its human-readable rendering, a **validator**, and the update
+script above. See [examples/README.md](examples/README.md).
+
 ## Usage
 
 Once the JAR is deployed to a Keycloak server, the endpoint is available under the
@@ -21,7 +41,8 @@ Content-Type: application/json
 ```
 
 The caller must have the `manage-realm` permission. See `src/test/resources/json/`
-for example payloads.
+for raw example payloads, or [`examples/`](examples/) for a config-as-code
+toolchain that generates and applies them.
 
 The `force` query parameter is optional. When omitted, an import whose flows already
 exist (same config hash) is rejected with `409 Conflict`. Passing `force=true` instead

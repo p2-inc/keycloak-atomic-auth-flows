@@ -1,0 +1,26 @@
+{
+  "realm": "demo",
+  "enabled": true,
+  "displayName": "Atomic Auth Flows Demo",
+  "loginWithEmailAllowed": true,
+  "identityProviders": [
+    {
+      "alias": "demo-oidc",
+      "displayName": "Demo OIDC Provider",
+      "providerId": "oidc",
+      "enabled": false,
+      "trustEmail": true,
+      "storeToken": false,
+      "addReadTokenRoleOnCreate": false,
+      "linkOnly": false,
+      "config": {
+        "clientId": "demo-oidc-client",
+        "clientSecret": "placeholder-not-a-real-secret",
+        "authorizationUrl": "https://id.example.com/authorize",
+        "tokenUrl": "https://id.example.com/token",
+        "clientAuthMethod": "client_secret_post",
+        "syncMode": "IMPORT"
+      }
+    }
+  ]
+}

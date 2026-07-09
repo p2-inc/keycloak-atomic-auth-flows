@@ -1,0 +1,20 @@
+# Starts a Keycloak with the atomic-auth-flows extension loaded, in dev mode,
+# with a minimal `demo` realm imported on startup. Once it's up, apply the demo
+# authentication flows with:
+#
+#   ruby examples/scripts/update_auth_flows.rb
+#
+# Admin console: http://localhost:8080  (admin / admin)
+services:
+  keycloak:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: keycloak-atomic-auth-flows-demo
+    command: ["start-dev", "--import-realm"]
+    environment:
+      # Bootstrap admin created in the master realm on first start.
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+    ports:
+      - "8080:8080"
