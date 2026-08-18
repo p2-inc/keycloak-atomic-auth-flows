@@ -111,6 +111,6 @@ mvn -Dtest=AuthenticationFlowsResourceApiTest test
 
 ## License
 
-We’ve changed the license of our core extensions from the AGPL v3 to the [Elastic License v2](https://github.com/elastic/elasticsearch/blob/main/licenses/ELASTIC-LICENSE-2.0.txt).
+[Apache License, Version 2.0,](https://github.com/elastic/elasticsearch/blob/main/licenses/ELASTIC-LICENSE-2.0.txt).
 
-All other documentation, source code and other files in this repository are Copyright 2026 Phase Two, Inc.
+All documentation, source code and other files in this repository are Copyright 2026 Phase Two, Inc.
