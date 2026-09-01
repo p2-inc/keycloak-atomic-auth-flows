@@ -11,10 +11,41 @@
 
     <name>keycloak-atomic-auth-flows</name>
     <description>Config as code solution to safely update Keycloak authentication flows</description>
+    <url>https://github.com/p2-inc/keycloak-atomic-auth-flows</url>
+
+    <parent>
+        <groupId>io.phasetwo</groupId>
+        <artifactId>oss-parent</artifactId>
+        <version>0.13</version>
+    </parent>
+
+    <developers>
+        <developer>
+            <name>Phase Two, Inc.</name>
+            <url>https://github.com/p2-inc</url>
+        </developer>
+    </developers>
+
+    <licenses>
+        <license>
+            <name>The Apache License, Version 2.0</name>
+            <url>http://www.apache.org/licenses/LICENSE-2.0.txt</url>
+        </license>
+    </licenses>
+
+    <scm>
+        <url>https://github.com/p2-inc/keycloak-atomic-auth-flows</url>
+        <connection>scm:git:git@github.com:p2-inc/keycloak-atomic-auth-flows.git</connection>
+        <tag>HEAD</tag>
+    </scm>
 
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <!-- java.version feeds the compiler source/target managed by oss-parent (which defaults to 1.8) -->
+        <java.version>21</java.version>
         <maven.compiler.release>21</maven.compiler.release>
+        <ossrh.url>https://ossrh-staging-api.central.sonatype.com</ossrh.url>
+        <jacoco.version>0.8.14</jacoco.version>
         <keycloak.version>26.5.7</keycloak.version>
         <keycloak-admin-client.version>26.0.9</keycloak-admin-client.version>
         <lombok.version>1.18.38</lombok.version>
@@ -153,6 +184,15 @@
             <version>2.0.12</version>
             <scope>test</scope>
         </dependency>
+        <!-- Agent jar copied into the Keycloak container to measure coverage of the
+             extension code, which runs inside the server rather than in the surefire JVM. -->
+        <dependency>
+            <groupId>org.jacoco</groupId>
+            <artifactId>org.jacoco.agent</artifactId>
+            <version>${jacoco.version}</version>
+            <classifier>runtime</classifier>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
@@ -182,7 +222,96 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.5.1</version>
+                <configuration>
+                    <systemPropertyVariables>
+                        <keycloak-version>${keycloak.version}</keycloak-version>
+                    </systemPropertyVariables>
+                </configuration>
+            </plugin>
+
+            <!-- oss-parent's `releases` profile attaches a javadoc jar; Central rejects the
+                 release if it fails to build, so keep it on the project's source level. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-javadoc-plugin</artifactId>
+                <version>3.12.0</version>
+                <configuration>
+                    <source>${java.version}</source>
+                </configuration>
             </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <!--
+          Coverage of a Keycloak extension has to be collected inside the server JVM, not the
+          surefire JVM. This profile copies the JaCoCo agent to target/jacoco-agent/, which
+          AbstractTestBase detects and mounts into the Keycloak container; the container's
+          exec dumps land in target/jacoco-report/ and are merged into a single report.
+          Left out of the default build so plain `mvn test` keeps container reuse.
+        -->
+        <profile>
+            <id>coverage</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-dependency-plugin</artifactId>
+                        <version>3.8.1</version>
+                        <executions>
+                            <execution>
+                                <id>copy-jacoco</id>
+                                <phase>compile</phase>
+                                <goals>
+                                    <goal>copy-dependencies</goal>
+                                </goals>
+                                <configuration>
+                                    <includeArtifactIds>org.jacoco.agent</includeArtifactIds>
+                                    <includeClassifiers>runtime</includeClassifiers>
+                                    <outputDirectory>${project.build.directory}/jacoco-agent</outputDirectory>
+                                    <stripVersion>true</stripVersion>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+
+                    <plugin>
+                        <groupId>org.jacoco</groupId>
+                        <artifactId>jacoco-maven-plugin</artifactId>
+                        <version>${jacoco.version}</version>
+                        <executions>
+                            <execution>
+                                <id>merge</id>
+                                <phase>test</phase>
+                                <goals>
+                                    <goal>merge</goal>
+                                </goals>
+                                <configuration>
+                                    <fileSets>
+                                        <fileSet>
+                                            <directory>${project.build.directory}/jacoco-report/</directory>
+                                            <includes>
+                                                <include>*.exec</include>
+                                            </includes>
+                                        </fileSet>
+                                    </fileSets>
+                                    <destFile>${project.build.directory}/jacoco-report/jacoco-all.exec</destFile>
+                                </configuration>
+                            </execution>
+                            <execution>
+                                <id>report</id>
+                                <phase>test</phase>
+                                <goals>
+                                    <goal>report</goal>
+                                </goals>
+                                <configuration>
+                                    <dataFile>${project.build.directory}/jacoco-report/jacoco-all.exec</dataFile>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>

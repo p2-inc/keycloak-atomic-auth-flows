@@ -17,7 +17,8 @@ COPY pom.xml .
 RUN mvn -B -q dependency:go-offline || true
 COPY src ./src
 # Tests use Testcontainers (a Docker daemon); skip them in the image build.
-RUN mvn -B -DskipTests clean package
+# Spotless ratchets against origin/main and there is no git repo in this stage, so skip its check.
+RUN mvn -B -DskipTests -Dspotless.check.skip=true clean package
 
 # --- Stage 2: Keycloak with the extension loaded -----------------------------
 FROM quay.io/keycloak/keycloak:${KEYCLOAK_VERSION}

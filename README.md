@@ -109,8 +109,36 @@ To run a single test class:
 mvn -Dtest=AuthenticationFlowsResourceApiTest test
 ```
 
+The extension runs inside the Keycloak server rather than in the surefire JVM, so coverage
+has to be collected there. The `coverage` profile stages the JaCoCo agent, which the test
+base mounts into the container and harvests on teardown:
+
+```bash
+mvn verify -Pcoverage
+```
+
+The merged report lands in `target/site/jacoco/`. The profile is off by default so a plain
+`mvn test` keeps its reusable container.
+
+## Releases
+
+Every merge to `main` is tagged `v<version>` and published to
+[Maven Central](https://repo1.maven.org/maven2/io/phasetwo/keycloak/keycloak-atomic-auth-flows/)
+by the `release version` workflow. Jars can be downloaded from there, or pulled in as a
+dependency:
+
+```xml
+<dependency>
+    <groupId>io.phasetwo.keycloak</groupId>
+    <artifactId>keycloak-atomic-auth-flows</artifactId>
+    <version>LATEST</version>
+</dependency>
+```
+
+Add `[ci skip]` to a commit message to merge without cutting a release.
+
 ## License
 
-[Apache License, Version 2.0,](https://github.com/elastic/elasticsearch/blob/main/licenses/ELASTIC-LICENSE-2.0.txt).
+[Apache License, Version 2.0](https://www.apache.org/licenses/LICENSE-2.0.txt).
 
 All documentation, source code and other files in this repository are Copyright 2026 Phase Two, Inc.
