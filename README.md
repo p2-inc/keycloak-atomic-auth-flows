@@ -82,7 +82,7 @@ payload hash, so a binding always points at a flow imported in the same request.
 
 ## Build
 
-Requires **JDK 21** and **Maven**. The build targets **Keycloak 26.5.7**.
+Requires **JDK 21** and **Maven**.
 
 ```bash
 mvn clean package
@@ -111,6 +111,6 @@ mvn -Dtest=AuthenticationFlowsResourceApiTest test
 
 ## License
 
-[Apache License, Version 2.0,](https://github.com/elastic/elasticsearch/blob/main/licenses/ELASTIC-LICENSE-2.0.txt).
+[Apache License, Version 2.0,](https://www.apache.org/licenses/LICENSE-2.0.txt).
 
 All documentation, source code and other files in this repository are Copyright 2026 Phase Two, Inc.
