@@ -34,17 +34,17 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <main.java.package>io.phasetwo.keycloak.atomic</main.java.package>
         <maven.compiler.release>21</maven.compiler.release>
-        <keycloak.version>26.5.7</keycloak.version>
+        <keycloak.version>26.7.3</keycloak.version>
         <keycloak-admin-client.version>26.0.9</keycloak-admin-client.version>
-        <lombok.version>1.18.38</lombok.version>
+        <lombok.version>1.18.46</lombok.version>
         <auto-service.version>1.1.1</auto-service.version>
         <jsr305.version>3.0.2</jsr305.version>
         <jakarta.validation.version>3.0.2</jakarta.validation.version>
         <junit.version>5.11.3</junit.version>
         <testcontainers.version>1.21.4</testcontainers.version>
-        <testcontainers-keycloak.version>4.2.1</testcontainers-keycloak.version>
-        <shrinkwrap.version>3.3.6</shrinkwrap.version>
-        <rest-assured.version>5.5.0</rest-assured.version>
+        <testcontainers-keycloak.version>4.3.1</testcontainers-keycloak.version>
+        <shrinkwrap.version>3.3.7</shrinkwrap.version>
+        <rest-assured.version>5.5.7</rest-assured.version>
         <jackson.version>2.17.2</jackson.version>
         <org-json.version>20240303</org-json.version>
     </properties>
