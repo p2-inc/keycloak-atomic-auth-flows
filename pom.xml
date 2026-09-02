@@ -4,7 +4,7 @@
 
     <groupId>io.phasetwo.keycloak</groupId>
     <artifactId>keycloak-atomic-auth-flows</artifactId>
-    <version>0.2-SNAPSHOT</version>
+    <version>0.2</version>
     <packaging>jar</packaging>
 
     <name>keycloak-atomic-auth-flows</name>
@@ -27,7 +27,7 @@
     <scm>
       <url>https://github.com/p2-inc/keycloak-atomic-auth-flows</url>
       <connection>scm:git:git@github.com:p2-inc/keycloak-atomic-auth-flows.git</connection>
-      <tag>HEAD</tag>
+      <tag>v0.2</tag>
     </scm>
   
     <properties>
