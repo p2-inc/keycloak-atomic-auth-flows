@@ -65,11 +65,15 @@ The model is: **you edit the builder, everything else is generated or derived.**
 
    This POSTs `auth_flows_tree.json` to
    `/admin/realms/demo/authentication-flow/import`. The endpoint imports all
-   flows, configs and bindings in one transaction and prefixes every flow alias
-   with a hash of the flows+configs. Re-posting the identical tree returns
-   **409** (already imported) instead of duplicating anything, so this is safe
-   to run repeatedly. Pass `--force` to re-apply the bindings over an
-   already-imported tree.
+   flows, configs and bindings in one transaction. In the default **versioned**
+   mode it prefixes every flow alias with a hash of the flows+configs, and
+   re-posting the identical tree returns **409** (already imported) instead of
+   duplicating anything, so this is safe to run repeatedly. Pass `--force` to
+   re-apply the bindings over an already-imported tree.
+
+   Pass `--mode replace` to use **replace** mode instead: flows keep their plain
+   aliases, an existing flow is overwritten in place, and re-posting the same
+   tree is a no-op. See the top-level README for when to use which.
 
 ## Running it against the bundled Keycloak
 
@@ -114,7 +118,8 @@ ruby examples/scripts/auth_flow_validator.rb examples/your-realm
 KC_REALM=your-realm ruby examples/scripts/update_auth_flows.rb examples/your-realm
 ```
 
-Flows are **append-only** in spirit: because the endpoint keys imported flows by
-a hash of their contents, "changing" a flow means importing a new version
-(new content → new hash → new aliases) and re-binding to it, rather than
-mutating flows already in Keycloak.
+In versioned mode flows are **append-only** in spirit: because the endpoint keys
+imported flows by a hash of their contents, "changing" a flow means importing a
+new version (new content → new hash → new aliases) and re-binding to it, rather
+than mutating flows already in Keycloak. In replace mode the same edit overwrites
+the existing flow under its plain alias.
