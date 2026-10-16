@@ -45,7 +45,7 @@ Once the JAR is deployed to a Keycloak server, the endpoint is available under t
 realm admin API:
 
 ```
-POST /admin/realms/{realm}/authentication-flow/import[?mode=versioned|replace][&force=true]
+POST /admin/realms/{realm}/authentication-flow/import[?mode=versioned|replace][&force=true][&dryRun=true]
 Content-Type: application/json
 ```
 
@@ -57,6 +57,7 @@ toolchain that generates and applies them.
 | --- | --- |
 | `mode` | `versioned` or `replace`. Overrides the server-wide default for this request. See [Import modes](#import-modes). |
 | `force` | Versioned mode only. When omitted, an import whose flows already exist (same payload hash) is rejected with `409 Conflict`. `force=true` instead re-applies the flow bindings over the already-imported flows. Any other value is treated as `false`. Ignored in replace mode. |
+| `dryRun` | `dryRun=true` validates and executes the whole import, then rolls it back. See [Dry run](#dry-run). |
 
 ## Import modes
 
@@ -90,7 +91,7 @@ Flows keep the plain aliases from the payload. For every flow in the payload:
   the payload (other realm bindings, other clients' overrides, other identity
   providers), keep resolving;
 - subflows that hung off a replaced flow but are no longer in the payload are
-  deleted;
+  deleted, unless a flow outside the payload still uses them;
 - authenticator configs are upserted by alias and never deleted, since other flows
   may share them.
 
@@ -105,9 +106,50 @@ id stays the same. The bindings are still (idempotently) re-applied. The respons
 through other channels (admin console, admin API) are not detected by this check;
 change the payload, or any value in it, to force a rewrite.
 
-As in versioned mode, everything happens in one transaction and the payload is validated
-before anything is written: dangling subflow or config references, a missing identity
-provider or client, or a built-in alias roll back the whole request with `400`.
+As in versioned mode, everything happens in one transaction, and any error rolls back
+the whole request with `400`, including the bindings and the recorded hash.
+
+#### Validation
+
+Before anything is written, replace mode checks that the payload is complete and
+consistent:
+
+- every flow has a known `providerId` (`basic-flow`, `form-flow` or `client-flow`);
+- every execution names an authenticator that is deployed on the server, looked up in the
+  SPI its parent flow type uses (`Authenticator`, `FormAction` or `ClientAuthenticator`),
+  and a valid requirement;
+- every subflow and config an execution references is in the payload;
+- the flows form a tree: a top-level flow is never used as a subflow, each subflow has
+  exactly one parent, and every subflow is reachable from a top-level flow (so no
+  orphans and no reference cycles).
+
+It then checks the payload against what the realm already has:
+
+- a built-in flow cannot be replaced;
+- an existing flow cannot change between top-level and subflow;
+- a flow that a flow outside the payload uses as a subflow cannot be replaced.
+
+A subflow that is no longer in the payload is deleted only if no flow outside the
+payload still uses it.
+
+#### Logins in progress
+
+Replacing a flow recreates all of its executions with new ids. A browser login that was
+part way through the old flow (for example, it showed the username/password form) can't
+continue: when the user submits, Keycloak no longer finds the execution the login was on
+and restarts the flow from the beginning. This is deliberate. If you replace a flow to
+require a second factor, a login that started before the change can't finish without it.
+
+An identical re-post (`X-Import-Result: unchanged`) rewrites nothing, so it doesn't
+disturb logins in progress. `ReplaceModeInFlightLoginTest` covers both cases.
+
+### Dry run
+
+Add `dryRun=true` to run the whole import, including validation and bindings, inside the
+transaction and then roll it back. The response is what the real import would return:
+the same status and errors, the same body, and in replace mode the same `X-Import-Result`
+(`applied` means "would apply"). It also carries `X-Dry-Run: true`. This works in both
+modes and is meant for CI checks on a pull request before you apply the change.
 
 ### Choosing the mode
 
@@ -151,6 +193,20 @@ hash; in replace mode they are used as-is.
 | `clientId` | client | Client ID of the target client. |
 | `browserFlowBinding` | client | Alias of the flow to set as the client's **browser** flow override. |
 | `directFlowBinding` | client | Alias of the flow to set as the client's **direct grant** flow override. |
+
+## Export
+
+```
+GET /admin/realms/{realm}/authentication-flow/export[?alias=<top-level flow>&alias=...]
+```
+
+Returns top-level flows, every subflow they reach, and the authenticator configs those
+flows reference. The body is an `AuthenticationFlowPayload`, so you can commit it to a
+repository and post it back to `import` as-is. Ids are dropped and bindings are not
+exported. With no `alias`, it exports every top-level flow that is not built in. A built-in
+flow can be exported by naming it, for example as a starting point for a copy. An unknown
+alias returns `404`, and a subflow alias returns `400` (export its top-level flow
+instead). The caller needs `view-realm`.
 
 ## Build
 

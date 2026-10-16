@@ -1,5 +1,6 @@
 package io.phasetwo.keycloak.rest;
 
+import static io.phasetwo.keycloak.rest.AuthenticationFlowResource.DRY_RUN_HEADER;
 import static io.phasetwo.keycloak.rest.AuthenticationFlowResource.RESULT_APPLIED;
 import static io.phasetwo.keycloak.rest.AuthenticationFlowResource.RESULT_HEADER;
 import static io.phasetwo.keycloak.rest.AuthenticationFlowResource.RESULT_UNCHANGED;
@@ -11,9 +12,11 @@ import static io.phasetwo.keycloak.rest.ReplaceModeTestSupport.V1;
 import static io.phasetwo.keycloak.rest.ReplaceModeTestSupport.V2;
 import static io.phasetwo.keycloak.rest.ReplaceModeTestSupport.authenticators;
 import static io.phasetwo.keycloak.rest.ReplaceModeTestSupport.executionIds;
+import static io.phasetwo.keycloak.rest.ReplaceModeTestSupport.flow;
 import static io.phasetwo.keycloak.rest.ReplaceModeTestSupport.flowId;
 import static io.phasetwo.keycloak.rest.ReplaceModeTestSupport.load;
 import static io.phasetwo.keycloak.rest.ReplaceModeTestSupport.v1WithoutSpnegoAndOtp;
+import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -26,12 +29,15 @@ import io.phasetwo.keycloak.model.ClientFlowPayload;
 import io.restassured.response.Response;
 import jakarta.ws.rs.NotFoundException;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.keycloak.admin.client.resource.RealmResource;
+import org.keycloak.representations.idm.AuthenticationExecutionExportRepresentation;
+import org.keycloak.representations.idm.AuthenticationFlowRepresentation;
 import org.keycloak.representations.idm.AuthenticatorConfigRepresentation;
 import org.keycloak.representations.idm.ClientRepresentation;
 import org.keycloak.representations.idm.RealmRepresentation;
@@ -255,6 +261,334 @@ class AuthenticationFlowsReplaceModeApiTest extends AbstractTestBase {
     String binding = response.jsonPath().getString("browserFlowBinding");
     assertNotEquals(BROWSER, binding);
     assertTrue(binding.endsWith("-" + BROWSER));
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Validation
+  // -------------------------------------------------------------------------------------------
+
+  @Test
+  void unknownAuthenticatorProvider_isRejected() throws IOException {
+    AuthenticationFlowPayload payload = load(V1);
+    flow(payload, BROWSER_FORMS).getAuthenticationExecutions().getFirst().setAuthenticator("nope");
+
+    assertRejected(payload, "unknown Authenticator provider 'nope'");
+  }
+
+  @Test
+  void unknownFlowProviderId_isRejected() throws IOException {
+    AuthenticationFlowPayload payload = load(V1);
+    flow(payload, BROWSER_FORMS).setProviderId("weird-flow");
+
+    assertRejected(payload, "unknown providerId 'weird-flow'");
+  }
+
+  @Test
+  void subflowCycle_isRejected() throws IOException {
+    // browser no longer reaches forms; forms -> OTP -> forms is a cycle nobody can enter
+    AuthenticationFlowPayload payload = load(V1);
+    flow(payload, BROWSER).getAuthenticationExecutions().removeIf(e -> e.isAuthenticatorFlow());
+    AuthenticationExecutionExportRepresentation back =
+        new AuthenticationExecutionExportRepresentation();
+    back.setAuthenticatorFlow(true);
+    back.setFlowAlias(BROWSER_FORMS);
+    back.setRequirement("REQUIRED");
+    back.setPriority(99);
+    flow(payload, BROWSER_OTP).getAuthenticationExecutions().add(back);
+
+    assertRejected(payload, "subflow reference cycle");
+  }
+
+  @Test
+  void subflowWithTwoParents_isRejected() throws IOException {
+    AuthenticationFlowPayload payload = load(V1);
+    AuthenticationExecutionExportRepresentation second =
+        new AuthenticationExecutionExportRepresentation();
+    second.setAuthenticatorFlow(true);
+    second.setFlowAlias(BROWSER_OTP);
+    second.setRequirement("CONDITIONAL");
+    second.setPriority(99);
+    flow(payload, FIRST_BROKER_LOGIN).getAuthenticationExecutions().add(second);
+
+    assertRejected(payload, "a subflow can have only one parent");
+  }
+
+  @Test
+  void topLevelFlowUsedAsSubflow_isRejected() throws IOException {
+    AuthenticationFlowPayload payload = load(V1);
+    flow(payload, BROWSER_FORMS).setTopLevel(true);
+
+    assertRejected(payload, "is top-level but is used as a subflow");
+  }
+
+  @Test
+  void orphanedSubflowInPayload_isRejected() throws IOException {
+    AuthenticationFlowPayload payload = load(V1);
+    flow(payload, BROWSER_FORMS)
+        .getAuthenticationExecutions()
+        .removeIf(e -> e.isAuthenticatorFlow());
+
+    assertRejected(payload, "is not reachable from any top-level flow");
+  }
+
+  @Test
+  void changingWhetherAnExistingFlowIsTopLevel_isRejected() throws IOException {
+    assertEquals(200, post(load(V1)).statusCode());
+    List<String> executions = executionIds(keycloak, REALM_NAME, BROWSER);
+    // promote "forms" to a top-level flow of its own
+    AuthenticationFlowPayload payload = load(V1);
+    flow(payload, BROWSER).getAuthenticationExecutions().removeIf(e -> e.isAuthenticatorFlow());
+    flow(payload, BROWSER_FORMS).setTopLevel(true);
+
+    Response response = post(payload);
+
+    assertEquals(400, response.statusCode(), response.asString());
+    assertTrue(
+        response.asString().contains("exists as a subflow and cannot be replaced as a top-level"),
+        response.asString());
+    assertEquals(executions, executionIds(keycloak, REALM_NAME, BROWSER));
+  }
+
+  @Test
+  void subflowUsedByAFlowOutsideThePayload_isRejected() throws IOException {
+    assertEquals(200, post(load(V1)).statusCode());
+    // a new top-level flow that claims the existing "forms" subflow of "Copy of browser"
+    AuthenticationFlowPayload full = load(V1);
+    AuthenticationFlowRepresentation other = new AuthenticationFlowRepresentation();
+    other.setAlias("Other");
+    other.setProviderId("basic-flow");
+    other.setTopLevel(true);
+    AuthenticationExecutionExportRepresentation forms =
+        new AuthenticationExecutionExportRepresentation();
+    forms.setAuthenticatorFlow(true);
+    forms.setFlowAlias(BROWSER_FORMS);
+    forms.setRequirement("REQUIRED");
+    forms.setPriority(10);
+    other.setAuthenticationExecutions(new ArrayList<>(List.of(forms)));
+    AuthenticationFlowPayload payload = new AuthenticationFlowPayload();
+    payload.setAuthenticationFlows(
+        new ArrayList<>(List.of(other, flow(full, BROWSER_FORMS), flow(full, BROWSER_OTP))));
+    payload.setAuthenticatorConfig(new ArrayList<>());
+
+    assertRejected(payload, "is also used as a subflow by 'Copy of browser'");
+  }
+
+  @Test
+  void orphanedSubflowSharedWithAnotherFlow_isKept() throws IOException {
+    // Keycloak's own realm import lets two flows share a subflow; replace mode must not delete it
+    // from under the flow that is not in the payload.
+    String sharedRealm = "replace-shared-subflow";
+    AuthenticationFlowPayload v1 = load(V1);
+    AuthenticationFlowRepresentation other = new AuthenticationFlowRepresentation();
+    other.setAlias("Other");
+    other.setProviderId("basic-flow");
+    other.setTopLevel(true);
+    AuthenticationExecutionExportRepresentation otp =
+        new AuthenticationExecutionExportRepresentation();
+    otp.setAuthenticatorFlow(true);
+    otp.setFlowAlias(BROWSER_OTP);
+    otp.setRequirement("CONDITIONAL");
+    otp.setPriority(10);
+    other.setAuthenticationExecutions(new ArrayList<>(List.of(otp)));
+    List<AuthenticationFlowRepresentation> flows = new ArrayList<>(v1.getAuthenticationFlows());
+    flows.add(other);
+    RealmRepresentation rep = new RealmRepresentation();
+    rep.setRealm(sharedRealm);
+    rep.setEnabled(true);
+    rep.setAuthenticationFlows(flows);
+    rep.setAuthenticatorConfig(v1.getAuthenticatorConfig());
+    keycloak.realms().create(rep);
+    try {
+      Response response =
+          ReplaceModeTestSupport.post(
+              keycloak,
+              getAdminRealmUrl(sharedRealm) + "/authentication-flow/import",
+              v1WithoutSpnegoAndOtp(),
+              "replace");
+
+      assertEquals(200, response.statusCode(), response.asString());
+      assertEquals(
+          List.of("auth-username-password-form"),
+          authenticators(keycloak, sharedRealm, BROWSER_FORMS));
+      assertEquals(
+          3,
+          authenticators(keycloak, sharedRealm, BROWSER_OTP).size(),
+          "subflow still used by 'Other' is kept intact");
+    } finally {
+      keycloak.realm(sharedRealm).remove();
+    }
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Dry run
+  // -------------------------------------------------------------------------------------------
+
+  private Response dryRun(Object payload, String mode) {
+    return ReplaceModeTestSupport.post(
+        keycloak, importUrl, payload, mode, Map.of("dryRun", "true"));
+  }
+
+  @Test
+  void dryRun_reportsTheChange_butWritesNothing() throws IOException {
+    assertEquals(200, post(load(V1)).statusCode());
+    List<String> executions = executionIds(keycloak, REALM_NAME, BROWSER);
+
+    Response response = dryRun(v1WithoutSpnegoAndOtp(), "replace");
+
+    assertEquals(200, response.statusCode(), response.asString());
+    assertEquals("true", response.header(DRY_RUN_HEADER));
+    assertEquals(RESULT_APPLIED, response.header(RESULT_HEADER), "would apply");
+    assertEquals(executions, executionIds(keycloak, REALM_NAME, BROWSER));
+    assertEquals(3, authenticators(keycloak, REALM_NAME, BROWSER_OTP).size());
+    assertEquals(RESULT_UNCHANGED, post(load(V1)).header(RESULT_HEADER), "hash not recorded");
+  }
+
+  @Test
+  void dryRun_ofAnIdenticalPayload_reportsUnchanged() throws IOException {
+    assertEquals(200, post(load(V1)).statusCode());
+
+    Response response = dryRun(load(V1), "replace");
+
+    assertEquals(200, response.statusCode(), response.asString());
+    assertEquals(RESULT_UNCHANGED, response.header(RESULT_HEADER));
+  }
+
+  @Test
+  void dryRun_onAnEmptyRealm_createsNothing() throws IOException {
+    int flows = realm.flows().getFlows().size();
+    String browser = realm.toRepresentation().getBrowserFlow();
+    List<String> configs = configAliases();
+
+    Response response = dryRun(load(V1), "replace");
+
+    assertEquals(200, response.statusCode(), response.asString());
+    assertEquals(flows, realm.flows().getFlows().size());
+    assertEquals(browser, realm.toRepresentation().getBrowserFlow());
+    assertEquals(configs, configAliases());
+  }
+
+  @Test
+  void dryRun_returnsTheSameValidationErrors() throws IOException {
+    AuthenticationFlowPayload payload = load(V1);
+    ClientFlowPayload binding = new ClientFlowPayload();
+    binding.setClientId("does-not-exist");
+    binding.setBrowserFlowBinding(BROWSER);
+    payload.setClientFlowBinding(binding);
+
+    Response response = dryRun(payload, "replace");
+
+    assertEquals(400, response.statusCode(), response.asString());
+    assertTrue(response.asString().contains("Missing client with id: does-not-exist"));
+  }
+
+  @Test
+  void dryRun_inVersionedMode_createsNothing() throws IOException {
+    int flows = realm.flows().getFlows().size();
+
+    Response response = dryRun(load(V1), "versioned");
+
+    assertEquals(200, response.statusCode(), response.asString());
+    assertEquals("true", response.header(DRY_RUN_HEADER));
+    assertEquals(flows, realm.flows().getFlows().size());
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Export
+  // -------------------------------------------------------------------------------------------
+
+  private Response export(String... aliases) {
+    var request =
+        given()
+            .headers("Authorization", "Bearer " + keycloak.tokenManager().getAccessTokenString());
+    if (aliases.length > 0) {
+      request = request.queryParam("alias", (Object[]) aliases);
+    }
+    return request.get(getAdminRealmUrl(REALM_NAME) + "/authentication-flow/export");
+  }
+
+  @Test
+  void export_returnsTheFlowTreeAndItsConfigs_inImportFormat() throws IOException {
+    assertEquals(200, post(load(V1)).statusCode());
+
+    Response response = export(BROWSER);
+
+    assertEquals(200, response.statusCode(), response.asString());
+    AuthenticationFlowPayload exported = response.as(AuthenticationFlowPayload.class);
+    assertEquals(
+        List.of(BROWSER, BROWSER_FORMS, BROWSER_OTP),
+        exported.getAuthenticationFlows().stream()
+            .map(AuthenticationFlowRepresentation::getAlias)
+            .toList());
+    assertTrue(exported.getAuthenticationFlows().stream().allMatch(f -> f.getId() == null));
+    assertTrue(exported.getAuthenticatorConfig().isEmpty(), "browser tree uses no configs");
+    assertEquals(null, exported.getBrowserFlowBinding(), "bindings are not exported");
+
+    AuthenticationFlowPayload broker =
+        export(FIRST_BROKER_LOGIN).as(AuthenticationFlowPayload.class);
+    assertEquals(
+        List.of(
+            "Copy of first broker login create unique user config 2",
+            "Copy of first broker login review profile config 2"),
+        broker.getAuthenticatorConfig().stream()
+            .map(AuthenticatorConfigRepresentation::getAlias)
+            .toList());
+  }
+
+  @Test
+  void export_withoutAlias_returnsEveryNonBuiltInTopLevelFlow() throws IOException {
+    assertEquals(200, post(load(V1)).statusCode());
+
+    AuthenticationFlowPayload exported = export().as(AuthenticationFlowPayload.class);
+
+    assertEquals(5, exported.getAuthenticationFlows().size());
+    assertTrue(exported.getAuthenticationFlows().stream().noneMatch(f -> f.isBuiltIn()));
+    assertEquals(2, exported.getAuthenticatorConfig().size());
+  }
+
+  @Test
+  void export_roundTrips_andReimportingItIsANoOpForTheFlows() throws IOException {
+    assertEquals(200, post(load(V1)).statusCode());
+    AuthenticationFlowPayload exported = export().as(AuthenticationFlowPayload.class);
+
+    String copyRealm = "replace-export-copy";
+    AbstractTestBase.createRealm(copyRealm);
+    try {
+      Response response =
+          ReplaceModeTestSupport.post(
+              keycloak,
+              getAdminRealmUrl(copyRealm) + "/authentication-flow/import",
+              exported,
+              "replace");
+      assertEquals(200, response.statusCode(), response.asString());
+      for (String alias : List.of(BROWSER, BROWSER_FORMS, BROWSER_OTP, FIRST_BROKER_LOGIN)) {
+        assertEquals(
+            authenticators(keycloak, REALM_NAME, alias),
+            authenticators(keycloak, copyRealm, alias),
+            alias);
+      }
+    } finally {
+      keycloak.realm(copyRealm).remove();
+    }
+
+    assertEquals(200, post(exported).statusCode());
+    assertEquals(
+        RESULT_UNCHANGED,
+        post(exported).header(RESULT_HEADER),
+        "posting the same export twice is a no-op");
+  }
+
+  @Test
+  void export_ofAnUnknownFlow_is404_andOfASubflow_is400() {
+    assertEquals(404, export("does-not-exist").statusCode());
+    assertEquals(400, export("forms").statusCode());
+  }
+
+  private void assertRejected(AuthenticationFlowPayload payload, String message) {
+    int flows = realm.flows().getFlows().size();
+    Response response = post(payload);
+    assertEquals(400, response.statusCode(), response.asString());
+    assertTrue(response.asString().contains(message), response.asString());
+    assertEquals(flows, realm.flows().getFlows().size(), "nothing written");
   }
 
   private List<String> configAliases() {

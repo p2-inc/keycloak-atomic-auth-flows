@@ -7,6 +7,8 @@ import io.phasetwo.keycloak.model.HashObject;
 import io.phasetwo.keycloak.model.IdpFlowPayload;
 import io.phasetwo.keycloak.model.ImportMode;
 import jakarta.ws.rs.BadRequestException;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.NotFoundException;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
@@ -18,12 +20,19 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
 import lombok.extern.slf4j.Slf4j;
+import org.keycloak.authentication.AuthenticationFlow;
+import org.keycloak.authentication.Authenticator;
+import org.keycloak.authentication.ClientAuthenticator;
+import org.keycloak.authentication.FormAction;
+import org.keycloak.authentication.FormAuthenticator;
 import org.keycloak.common.util.Base64;
 import org.keycloak.deployment.DeployedConfigurationsManager;
 import org.keycloak.jose.jws.crypto.HashUtils;
@@ -36,7 +45,10 @@ import org.keycloak.models.ClientModel;
 import org.keycloak.models.IdentityProviderModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
+import org.keycloak.models.utils.ModelToRepresentation;
 import org.keycloak.models.utils.RepresentationToModel;
+import org.keycloak.provider.Provider;
+import org.keycloak.provider.ProviderFactory;
 import org.keycloak.representations.idm.AuthenticationExecutionExportRepresentation;
 import org.keycloak.representations.idm.AuthenticationFlowRepresentation;
 import org.keycloak.representations.idm.AuthenticatorConfigRepresentation;
@@ -56,6 +68,18 @@ public class AuthenticationFlowResource {
 
   public static final String RESULT_APPLIED = "applied";
   public static final String RESULT_UNCHANGED = "unchanged";
+
+  /**
+   * Response header set to {@code true} on a {@code dryRun=true} import: everything was validated
+   * and executed, then rolled back. The rest of the response describes what would have happened.
+   */
+  public static final String DRY_RUN_HEADER = "X-Dry-Run";
+
+  private static final Set<String> FLOW_PROVIDER_IDS =
+      Set.of(
+          AuthenticationFlow.BASIC_FLOW,
+          AuthenticationFlow.FORM_FLOW,
+          AuthenticationFlow.CLIENT_FLOW);
 
   /**
    * Realm attribute prefix under which replace mode records, per flow alias, the hash of the
@@ -93,6 +117,7 @@ public class AuthenticationFlowResource {
    *                imported instead of answering {@code 409}
    * @param mode    {@code versioned} or {@code replace}; overrides the server-wide default
    *                configured on the provider (see {@link ImportMode})
+   * @param dryRun  validate and execute the whole import, then roll it back instead of committing
    */
   @POST
   @Path("import")
@@ -100,7 +125,8 @@ public class AuthenticationFlowResource {
   public Response importAuthenticationFlows(
       AuthenticationFlowPayload payload,
       @QueryParam("force") Boolean force,
-      @QueryParam("mode") String mode) {
+      @QueryParam("mode") String mode,
+      @QueryParam("dryRun") Boolean dryRun) {
     auth.realm().requireManageRealm();
     ImportMode importMode;
     try {
@@ -108,17 +134,120 @@ public class AuthenticationFlowResource {
     } catch (IllegalArgumentException e) {
       throw ErrorResponse.error("Bad request. " + e.getMessage(), Response.Status.BAD_REQUEST);
     }
-    return switch (importMode) {
-      case VERSIONED -> importVersioned(payload, force != null && force);
-      case REPLACE -> importReplace(payload);
-    };
+    boolean isDryRun = dryRun != null && dryRun;
+    Response.ResponseBuilder response =
+        switch (importMode) {
+          case VERSIONED -> importVersioned(payload, force != null && force, isDryRun);
+          case REPLACE -> importReplace(payload, isDryRun);
+        };
+    if (isDryRun) {
+      response.header(DRY_RUN_HEADER, "true");
+    }
+    return response.build();
+  }
+
+  /**
+   * Exports top-level flows, their subflows and the authenticator configs they reference in the
+   * same format {@code import} accepts. Bindings are not exported. With no {@code alias}, every
+   * top-level flow that is not built in is exported.
+   *
+   * @param aliases top-level flow aliases to export; repeat the parameter for several
+   */
+  @GET
+  @Path("export")
+  @Produces(MediaType.APPLICATION_JSON)
+  public AuthenticationFlowPayload exportAuthenticationFlows(
+      @QueryParam("alias") List<String> aliases) {
+    auth.realm().requireViewRealm();
+    List<AuthenticationFlowModel> topLevel;
+    if (aliases == null || aliases.isEmpty()) {
+      topLevel =
+          realm
+              .getAuthenticationFlowsStream()
+              .filter(AuthenticationFlowModel::isTopLevel)
+              .filter(flow -> !flow.isBuiltIn())
+              .sorted((a, b) -> a.getAlias().compareTo(b.getAlias()))
+              .toList();
+    } else {
+      topLevel = new ArrayList<>();
+      for (String alias : aliases) {
+        AuthenticationFlowModel flow = realm.getFlowByAlias(alias);
+        if (flow == null) {
+          throw new NotFoundException("Flow not found: " + alias);
+        }
+        if (!flow.isTopLevel()) {
+          throw ErrorResponse.error(
+              "Bad request. Flow '%s' is a subflow; export its top-level flow".formatted(alias),
+              Response.Status.BAD_REQUEST);
+        }
+        topLevel.add(flow);
+      }
+    }
+
+    Map<String, AuthenticationFlowRepresentation> flows = new LinkedHashMap<>();
+    topLevel.forEach(flow -> collectFlow(realm, flow, flows));
+    Map<String, AuthenticatorConfigRepresentation> configs = new TreeMap<>();
+    for (AuthenticationFlowRepresentation flow : flows.values()) {
+      for (AuthenticationExecutionExportRepresentation execution :
+          flow.getAuthenticationExecutions()) {
+        String configAlias = execution.getAuthenticatorConfig();
+        if (configAlias != null && !configs.containsKey(configAlias)) {
+          AuthenticatorConfigModel config =
+              new DeployedConfigurationsManager(session)
+                  .getAuthenticatorConfigByAlias(realm, configAlias);
+          if (config != null) {
+            AuthenticatorConfigRepresentation rep = ModelToRepresentation.toRepresentation(config);
+            if (rep.getConfig() != null) {
+              rep.setConfig(new TreeMap<>(rep.getConfig()));
+            }
+            configs.put(configAlias, rep);
+          }
+        }
+      }
+    }
+
+    AuthenticationFlowPayload export = new AuthenticationFlowPayload();
+    export.setAuthenticationFlows(new ArrayList<>(flows.values()));
+    export.setAuthenticatorConfig(new ArrayList<>(configs.values()));
+    // same normalisation as the import: drops ids so the export can be posted back as-is
+    return AuthenticationFlowPayload.prefixFlows(export, "");
+  }
+
+  /** Adds {@code flow} and, depth first in execution order, every subflow it reaches. */
+  private void collectFlow(
+      RealmModel realm,
+      AuthenticationFlowModel flow,
+      Map<String, AuthenticationFlowRepresentation> flows) {
+    if (flows.containsKey(flow.getAlias())) {
+      return;
+    }
+    flows.put(flow.getAlias(), ModelToRepresentation.toRepresentation(session, realm, flow));
+    realm
+        .getAuthenticationExecutionsStream(flow.getId())
+        .filter(execution -> execution.isAuthenticatorFlow() && execution.getFlowId() != null)
+        .map(execution -> realm.getAuthenticationFlowById(execution.getFlowId()))
+        .filter(Objects::nonNull)
+        .forEach(subflow -> collectFlow(realm, subflow, flows));
+  }
+
+  /**
+   * Ends a successful import: commits, or on a dry run marks the transaction rollback-only so the
+   * request ends without writing anything.
+   */
+  private void complete(boolean dryRun) {
+    if (dryRun) {
+      session.getTransactionManager().setRollbackOnly();
+    } else if (session.getTransactionManager().isActive()) {
+      session.getTransactionManager().commit();
+    }
   }
 
   /**
    * Versioned mode: every import creates a new hash-prefixed set of flows and configs; nothing
    * that already exists is modified. See {@link ImportMode#VERSIONED}.
    */
-  private Response importVersioned(AuthenticationFlowPayload payload, boolean forceBinding) {
+  private Response.ResponseBuilder importVersioned(
+      AuthenticationFlowPayload payload, boolean forceBinding, boolean dryRun) {
     String payloadHash = hashImportedFlows(payload);
     var adaptedPayload = AuthenticationFlowPayload.prefixFlows(payload, payloadHash);
     try {
@@ -129,18 +258,15 @@ public class AuthenticationFlowResource {
         } else {
           log.error("Flows with same configs already imported. Hash: {}", payloadHash);
           return Response.status(Response.Status.CONFLICT)
-              .entity("Flows with same configs already imported. Hash: %s ".formatted(payloadHash))
-              .build();
+              .entity("Flows with same configs already imported. Hash: %s ".formatted(payloadHash));
         }
       }
       if (!exists) {
         importPayload(session, realm, adaptedPayload);
       }
 
-      if (session.getTransactionManager().isActive()) {
-        session.getTransactionManager().commit();
-      }
-      return Response.ok().entity(adaptedPayload).build();
+      complete(dryRun);
+      return Response.ok().entity(adaptedPayload);
     } catch (BadRequestException e) {
       session.getTransactionManager().setRollbackOnly();
 
@@ -163,7 +289,8 @@ public class AuthenticationFlowResource {
    * id, new executions), missing ones are created, and an identical re-post is a no-op. See
    * {@link ImportMode#REPLACE}.
    */
-  private Response importReplace(AuthenticationFlowPayload payload) {
+  private Response.ResponseBuilder importReplace(
+      AuthenticationFlowPayload payload, boolean dryRun) {
     String payloadHash = null;
     try {
       validateReplacePayload(payload);
@@ -179,24 +306,22 @@ public class AuthenticationFlowResource {
                 }
               });
       payloadHash = hashImportedFlows(plain);
-      rejectBuiltInFlows(realm, plain);
+      Map<String, List<String>> subflowParents = subflowParents(realm);
+      validateAgainstRealm(realm, plain, subflowParents);
 
       boolean unchanged = isAlreadyApplied(realm, plain, payloadHash);
       if (unchanged) {
         log.info("Flows already applied, re-applying bindings only. Hash: {}", payloadHash);
       } else {
-        replaceFlows(session, realm, plain);
+        replaceFlows(session, realm, plain, subflowParents);
         recordPayloadHash(realm, plain, payloadHash);
       }
       doBindings(session, realm, plain);
 
-      if (session.getTransactionManager().isActive()) {
-        session.getTransactionManager().commit();
-      }
+      complete(dryRun);
       return Response.ok()
           .entity(plain)
-          .header(RESULT_HEADER, unchanged ? RESULT_UNCHANGED : RESULT_APPLIED)
-          .build();
+          .header(RESULT_HEADER, unchanged ? RESULT_UNCHANGED : RESULT_APPLIED);
     } catch (BadRequestException e) {
       session.getTransactionManager().setRollbackOnly();
 
@@ -214,7 +339,7 @@ public class AuthenticationFlowResource {
    * Structural validation of a replace-mode payload, before anything is read from or written to
    * the realm. Every problem is a {@link BadRequestException}.
    */
-  private static void validateReplacePayload(AuthenticationFlowPayload payload) {
+  private void validateReplacePayload(AuthenticationFlowPayload payload) {
     if (payload == null) {
       throw new BadRequestException("Request body is required");
     }
@@ -243,10 +368,19 @@ public class AuthenticationFlowResource {
       if (!flowAliases.add(flow.getAlias())) {
         throw new BadRequestException("Duplicate flow alias: " + flow.getAlias());
       }
+      if (!FLOW_PROVIDER_IDS.contains(flow.getProviderId())) {
+        throw new BadRequestException(
+            "Flow '%s' has unknown providerId '%s'. Expected one of: %s"
+                .formatted(flow.getAlias(), flow.getProviderId(), FLOW_PROVIDER_IDS));
+      }
       if (flow.getAuthenticationExecutions() == null) {
         flow.setAuthenticationExecutions(new ArrayList<>());
       }
     }
+
+    Map<String, AuthenticationFlowRepresentation> flowsByAlias = new HashMap<>();
+    payload.getAuthenticationFlows().forEach(flow -> flowsByAlias.put(flow.getAlias(), flow));
+    Map<String, String> parentOf = new HashMap<>();
 
     for (AuthenticationFlowRepresentation flow : payload.getAuthenticationFlows()) {
       for (AuthenticationExecutionExportRepresentation execution :
@@ -261,9 +395,23 @@ public class AuthenticationFlowResource {
                 "Flow '%s' references subflow '%s' which is not in the payload"
                     .formatted(flow.getAlias(), execution.getFlowAlias()));
           }
-        } else if (execution.getAuthenticator() == null || execution.getAuthenticator().isBlank()) {
-          throw new BadRequestException(
-              "Flow '%s' has an execution without an authenticator".formatted(flow.getAlias()));
+          String previousParent = parentOf.put(execution.getFlowAlias(), flow.getAlias());
+          if (previousParent != null) {
+            throw new BadRequestException(
+                "Subflow '%s' is referenced by both '%s' and '%s'; a subflow can have only one parent"
+                    .formatted(execution.getFlowAlias(), previousParent, flow.getAlias()));
+          }
+          AuthenticationFlowRepresentation subflow = flowsByAlias.get(execution.getFlowAlias());
+          if (AuthenticationFlow.FORM_FLOW.equals(subflow.getProviderId())) {
+            // a form-flow is entered through a form authenticator (e.g. registration-page-form)
+            requireProvider(flow, execution.getAuthenticator(), FormAuthenticator.class);
+          }
+        } else {
+          if (execution.getAuthenticator() == null || execution.getAuthenticator().isBlank()) {
+            throw new BadRequestException(
+                "Flow '%s' has an execution without an authenticator".formatted(flow.getAlias()));
+          }
+          requireProvider(flow, execution.getAuthenticator(), executionSpi(flow));
         }
         if (execution.getAuthenticatorConfig() != null
             && !configAliases.contains(execution.getAuthenticatorConfig())) {
@@ -286,16 +434,122 @@ public class AuthenticationFlowResource {
         }
       }
     }
-  }
 
-  /** Replace mode never touches built-in flows; a payload naming one is rejected as a whole. */
-  private static void rejectBuiltInFlows(RealmModel realm, AuthenticationFlowPayload payload) {
+    // The payload must be a forest: top-level flows are never referenced, every subflow is
+    // referenced exactly once (checked above) and is reachable from a top-level flow. A subflow
+    // that is not reachable is either orphaned or part of a reference cycle.
+    Set<String> reachable = new HashSet<>();
     for (AuthenticationFlowRepresentation flow : payload.getAuthenticationFlows()) {
-      AuthenticationFlowModel existing = realm.getFlowByAlias(flow.getAlias());
-      if (existing != null && existing.isBuiltIn()) {
-        throw new BadRequestException("Built-in flow cannot be replaced: " + flow.getAlias());
+      if (flow.isTopLevel()) {
+        if (parentOf.containsKey(flow.getAlias())) {
+          throw new BadRequestException(
+              "Flow '%s' is top-level but is used as a subflow by '%s'"
+                  .formatted(flow.getAlias(), parentOf.get(flow.getAlias())));
+        }
+        markReachable(flow, flowsByAlias, reachable);
       }
     }
+    for (AuthenticationFlowRepresentation flow : payload.getAuthenticationFlows()) {
+      if (!reachable.contains(flow.getAlias())) {
+        throw new BadRequestException(
+            "Subflow '%s' is not reachable from any top-level flow in the payload (it is"
+                    .formatted(flow.getAlias())
+                + " orphaned, or part of a subflow reference cycle)");
+      }
+    }
+  }
+
+  private static void markReachable(
+      AuthenticationFlowRepresentation flow,
+      Map<String, AuthenticationFlowRepresentation> flowsByAlias,
+      Set<String> reachable) {
+    if (!reachable.add(flow.getAlias())) {
+      return;
+    }
+    for (AuthenticationExecutionExportRepresentation execution :
+        flow.getAuthenticationExecutions()) {
+      if (execution.isAuthenticatorFlow()) {
+        markReachable(flowsByAlias.get(execution.getFlowAlias()), flowsByAlias, reachable);
+      }
+    }
+  }
+
+  /** The SPI an execution's authenticator belongs to depends on the type of its parent flow. */
+  private static Class<? extends Provider> executionSpi(AuthenticationFlowRepresentation flow) {
+    return switch (flow.getProviderId()) {
+      case AuthenticationFlow.CLIENT_FLOW -> ClientAuthenticator.class;
+      case AuthenticationFlow.FORM_FLOW -> FormAction.class;
+      default -> Authenticator.class;
+    };
+  }
+
+  private void requireProvider(
+      AuthenticationFlowRepresentation flow, String providerId, Class<? extends Provider> spi) {
+    ProviderFactory<?> factory =
+        providerId == null || providerId.isBlank()
+            ? null
+            : session.getKeycloakSessionFactory().getProviderFactory(spi, providerId);
+    if (factory == null) {
+      throw new BadRequestException(
+          "Flow '%s' has an execution with unknown %s provider '%s'"
+              .formatted(flow.getAlias(), spi.getSimpleName(), providerId));
+    }
+  }
+
+  /**
+   * Checks the payload against what the realm already has, before anything is written. Replace
+   * mode never touches built-in flows, never changes whether a flow is top-level, and never
+   * rebuilds a flow that a flow outside the payload uses as a subflow.
+   */
+  private static void validateAgainstRealm(
+      RealmModel realm,
+      AuthenticationFlowPayload payload,
+      Map<String, List<String>> subflowParents) {
+    Set<String> payloadAliases = new HashSet<>();
+    payload.getAuthenticationFlows().forEach(flow -> payloadAliases.add(flow.getAlias()));
+    for (AuthenticationFlowRepresentation flow : payload.getAuthenticationFlows()) {
+      AuthenticationFlowModel existing = realm.getFlowByAlias(flow.getAlias());
+      if (existing == null) {
+        continue;
+      }
+      if (existing.isBuiltIn()) {
+        throw new BadRequestException("Built-in flow cannot be replaced: " + flow.getAlias());
+      }
+      if (existing.isTopLevel() != flow.isTopLevel()) {
+        throw new BadRequestException(
+            "Flow '%s' exists as a %s and cannot be replaced as a %s"
+                .formatted(
+                    flow.getAlias(),
+                    existing.isTopLevel() ? "top-level flow" : "subflow",
+                    flow.isTopLevel() ? "top-level flow" : "subflow"));
+      }
+      for (String parentId : subflowParents.getOrDefault(existing.getId(), List.of())) {
+        AuthenticationFlowModel parent = realm.getAuthenticationFlowById(parentId);
+        if (parent != null && !payloadAliases.contains(parent.getAlias())) {
+          throw new BadRequestException(
+              "Flow '%s' is also used as a subflow by '%s', which is not in the payload"
+                  .formatted(flow.getAlias(), parent.getAlias()));
+        }
+      }
+    }
+  }
+
+  /** Subflow id to the ids of every flow that has an execution pointing at it, as stored now. */
+  private static Map<String, List<String>> subflowParents(RealmModel realm) {
+    Map<String, List<String>> parents = new HashMap<>();
+    realm
+        .getAuthenticationFlowsStream()
+        .forEach(
+            flow ->
+                realm
+                    .getAuthenticationExecutionsStream(flow.getId())
+                    .filter(e -> e.isAuthenticatorFlow() && e.getFlowId() != null)
+                    .forEach(
+                        e ->
+                            parents
+                                .computeIfAbsent(e.getFlowId(), k -> new ArrayList<>())
+                                .add(flow.getId())));
+    return parents;
   }
 
   /**
@@ -338,11 +592,18 @@ public class AuthenticationFlowResource {
    * Upserts the configs by alias, then for every flow in the payload keeps (or creates) the flow
    * row and rebuilds its executions from the payload. Flow ids are stable across replaces, so
    * bindings made outside this payload keep resolving. Subflows that hung off a replaced flow but
-   * are not in the payload are deleted; configs are never deleted because other flows may share
-   * them.
+   * are not in the payload are deleted, unless a flow outside the payload also uses them; configs
+   * are never deleted because other flows may share them.
+   *
+   * <p>Every execution is recreated with a new id, so an authentication session that is part way
+   * through a replaced flow cannot resume: Keycloak no longer finds its current execution and
+   * restarts the flow from the beginning.
    */
   private void replaceFlows(
-      KeycloakSession session, RealmModel realm, AuthenticationFlowPayload payload) {
+      KeycloakSession session,
+      RealmModel realm,
+      AuthenticationFlowPayload payload,
+      Map<String, List<String>> subflowParents) {
     for (AuthenticatorConfigRepresentation configRep : payload.getAuthenticatorConfig()) {
       AuthenticatorConfigModel existing = realm.getAuthenticatorConfigByAlias(configRep.getAlias());
       if (existing == null) {
@@ -355,7 +616,14 @@ public class AuthenticationFlowResource {
     }
 
     Set<String> payloadAliases = new HashSet<>();
-    payload.getAuthenticationFlows().forEach(flow -> payloadAliases.add(flow.getAlias()));
+    Set<String> rebuiltIds = new HashSet<>();
+    for (AuthenticationFlowRepresentation flowRep : payload.getAuthenticationFlows()) {
+      payloadAliases.add(flowRep.getAlias());
+      AuthenticationFlowModel existing = realm.getFlowByAlias(flowRep.getAlias());
+      if (existing != null) {
+        rebuiltIds.add(existing.getId());
+      }
+    }
 
     for (AuthenticationFlowRepresentation flowRep : payload.getAuthenticationFlows()) {
       AuthenticationFlowModel existing = realm.getFlowByAlias(flowRep.getAlias());
@@ -364,11 +632,9 @@ public class AuthenticationFlowResource {
         model.setBuiltIn(false);
         realm.addAuthenticationFlow(model);
       } else {
-        clearFlow(realm, existing, payloadAliases);
+        clearFlow(realm, existing, payloadAliases, rebuiltIds, subflowParents);
         existing.setDescription(flowRep.getDescription());
         existing.setProviderId(flowRep.getProviderId());
-        existing.setTopLevel(flowRep.isTopLevel());
-        existing.setBuiltIn(false);
         realm.updateAuthenticationFlow(existing);
       }
     }
@@ -385,17 +651,31 @@ public class AuthenticationFlowResource {
   /**
    * Removes every execution of {@code flow}. A subflow reached through one of them is deleted
    * recursively unless its alias is in {@code keepAliases} (it is in the payload and will be
-   * rebuilt under its own entry); the flow row itself is always kept.
+   * rebuilt under its own entry), it is built in, or a flow that is neither rebuilt nor being
+   * deleted also uses it; the flow row itself is always kept.
    */
   private static void clearFlow(
-      RealmModel realm, AuthenticationFlowModel flow, Set<String> keepAliases) {
+      RealmModel realm,
+      AuthenticationFlowModel flow,
+      Set<String> keepAliases,
+      Set<String> rebuiltIds,
+      Map<String, List<String>> subflowParents) {
     List<AuthenticationExecutionModel> executions =
         realm.getAuthenticationExecutionsStream(flow.getId()).toList();
     for (AuthenticationExecutionModel execution : executions) {
       if (execution.isAuthenticatorFlow() && execution.getFlowId() != null) {
         AuthenticationFlowModel subflow = realm.getAuthenticationFlowById(execution.getFlowId());
-        if (subflow != null && !keepAliases.contains(subflow.getAlias())) {
-          clearFlow(realm, subflow, keepAliases);
+        boolean sharedOutside =
+            subflow != null
+                && subflowParents.getOrDefault(subflow.getId(), List.of()).stream()
+                    .anyMatch(
+                        parentId ->
+                            !parentId.equals(flow.getId()) && !rebuiltIds.contains(parentId));
+        if (subflow != null
+            && !keepAliases.contains(subflow.getAlias())
+            && !subflow.isBuiltIn()
+            && !sharedOutside) {
+          clearFlow(realm, subflow, keepAliases, rebuiltIds, subflowParents);
           realm.removeAuthenticationFlow(subflow);
         }
       }

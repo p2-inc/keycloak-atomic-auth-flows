@@ -10,6 +10,7 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import org.keycloak.admin.client.Keycloak;
 import org.keycloak.common.util.StreamUtil;
 import org.keycloak.representations.idm.AuthenticationExecutionInfoRepresentation;
@@ -62,15 +63,32 @@ final class ReplaceModeTestSupport {
   }
 
   static Response post(Keycloak keycloak, String importUrl, Object payload, String mode) {
+    return post(keycloak, importUrl, payload, mode, Map.of());
+  }
+
+  static Response post(
+      Keycloak keycloak,
+      String importUrl,
+      Object payload,
+      String mode,
+      Map<String, String> queryParams) {
     var request =
         given()
             .headers("Authorization", "Bearer " + keycloak.tokenManager().getAccessTokenString())
             .contentType("application/json")
+            .queryParams(queryParams)
             .body(payload);
     if (mode != null) {
       request = request.queryParam("mode", mode);
     }
     return request.post(importUrl);
+  }
+
+  static AuthenticationFlowRepresentation flow(AuthenticationFlowPayload payload, String alias) {
+    return payload.getAuthenticationFlows().stream()
+        .filter(f -> alias.equals(f.getAlias()))
+        .findFirst()
+        .orElseThrow(() -> new AssertionError("No flow " + alias + " in payload"));
   }
 
   static String flowId(Keycloak keycloak, String realm, String alias) {
