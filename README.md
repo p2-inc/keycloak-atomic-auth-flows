@@ -99,15 +99,19 @@ Flows and configs in the realm that the payload does not mention are left alone.
 Built-in flows are never touched: a payload that names one is rejected with `400`
 and nothing is written.
 
-The import records the hash of the payload against every flow it writes, so re-posting
-an identical payload is a true no-op: nothing is rewritten and every flow and execution
-id stays the same. The bindings are still (idempotently) re-applied. The response header
-`X-Import-Result` says which happened: `applied` or `unchanged`. Changes made to a flow
-through other channels (admin console, admin API) are not detected by this check;
-change the payload, or any value in it, to force a rewrite.
+Before writing, the import compares every flow and config in the payload with what the
+realm has now: a flow's description, type, and executions (authenticator, requirement,
+priority, subflow and config alias), and a config's values. Only flows and configs that
+are missing or differ are written; the rest keep their ids. Re-posting an identical
+payload is therefore a true no-op: nothing is rewritten and every flow and execution id
+stays the same. The bindings are still (idempotently) re-applied. The response header
+`X-Import-Result` says which happened: `applied` if anything was written, otherwise
+`unchanged`. Because the comparison is against the realm itself, and nothing is stored
+about previous imports, a flow edited in the admin console or through the admin API is
+detected and rewritten by the next import of the payload.
 
 As in versioned mode, everything happens in one transaction, and any error rolls back
-the whole request with `400`, including the bindings and the recorded hash.
+the whole request with `400`, including the bindings.
 
 #### Validation
 
@@ -140,8 +144,9 @@ continue: when the user submits, Keycloak no longer finds the execution the logi
 and restarts the flow from the beginning. This is deliberate. If you replace a flow to
 require a second factor, a login that started before the change can't finish without it.
 
-An identical re-post (`X-Import-Result: unchanged`) rewrites nothing, so it doesn't
-disturb logins in progress. `ReplaceModeInFlightLoginTest` covers both cases.
+An identical re-post (`X-Import-Result: unchanged`) rewrites nothing, and a flow in the
+payload that matches the realm keeps its executions even when other flows change, so
+neither disturbs logins in progress on that flow. `ReplaceModeInFlightLoginTest` covers both cases.
 
 ### Dry run
 

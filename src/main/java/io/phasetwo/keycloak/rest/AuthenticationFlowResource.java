@@ -18,15 +18,16 @@ import jakarta.ws.rs.core.Response;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
-import java.util.UUID;
 import lombok.extern.slf4j.Slf4j;
 import org.keycloak.authentication.AuthenticationFlow;
 import org.keycloak.authentication.Authenticator;
@@ -80,12 +81,6 @@ public class AuthenticationFlowResource {
           AuthenticationFlow.BASIC_FLOW,
           AuthenticationFlow.FORM_FLOW,
           AuthenticationFlow.CLIENT_FLOW);
-
-  /**
-   * Realm attribute prefix under which replace mode records, per flow alias, the hash of the
-   * payload that last wrote that flow. Lets an identical re-post be a true no-op.
-   */
-  static final String HASH_ATTRIBUTE_PREFIX = "_providerConfig.authentication-flow.hash.";
 
   private final KeycloakSession session;
   private final RealmModel realm;
@@ -291,11 +286,10 @@ public class AuthenticationFlowResource {
    */
   private Response.ResponseBuilder importReplace(
       AuthenticationFlowPayload payload, boolean dryRun) {
-    String payloadHash = null;
     try {
       validateReplacePayload(payload);
       // same normalisation as versioned mode, with an empty prefix: drops unknown fields and
-      // ids so the hash only reflects what the import actually writes
+      // ids so only what the import actually writes is compared with the realm
       AuthenticationFlowPayload plain = AuthenticationFlowPayload.prefixFlows(payload, "");
       plain
           .getAuthenticatorConfig()
@@ -305,16 +299,17 @@ public class AuthenticationFlowResource {
                   config.setConfig(new TreeMap<>(config.getConfig()));
                 }
               });
-      payloadHash = hashImportedFlows(plain);
       Map<String, List<String>> subflowParents = subflowParents(realm);
       validateAgainstRealm(realm, plain, subflowParents);
 
-      boolean unchanged = isAlreadyApplied(realm, plain, payloadHash);
+      Set<String> changedConfigs = changedConfigs(realm, plain);
+      Set<String> changedFlows = changedFlows(realm, plain);
+      boolean unchanged = changedConfigs.isEmpty() && changedFlows.isEmpty();
       if (unchanged) {
-        log.info("Flows already applied, re-applying bindings only. Hash: {}", payloadHash);
+        log.info("Flows and configs match the realm, re-applying bindings only");
       } else {
-        replaceFlows(session, realm, plain, subflowParents);
-        recordPayloadHash(realm, plain, payloadHash);
+        log.info("Writing changed configs {} and flows {}", changedConfigs, changedFlows);
+        replaceFlows(session, realm, plain, changedConfigs, changedFlows, subflowParents);
       }
       doBindings(session, realm, plain);
 
@@ -330,7 +325,7 @@ public class AuthenticationFlowResource {
     } catch (Exception e) {
       session.getTransactionManager().setRollbackOnly();
 
-      log.error("Internal error. Hash: {}", payloadHash, e);
+      log.error("Internal error.", e);
       throw ErrorResponse.error("Server error.", Response.Status.INTERNAL_SERVER_ERROR);
     }
   }
@@ -553,44 +548,106 @@ public class AuthenticationFlowResource {
   }
 
   /**
-   * True when every flow and config in the payload exists and every flow was last written by a
-   * payload with the same hash. Flows edited through other channels (console, admin API) are not
-   * detected; re-posting after such an edit still reports {@code unchanged}.
+   * What the import writes for one execution. A payload execution and a realm execution have the
+   * same shape when importing the former would recreate the latter. {@code userSetupAllowed} is
+   * not written by the import, so it is not part of the shape.
    */
-  private static boolean isAlreadyApplied(
-      RealmModel realm, AuthenticationFlowPayload payload, String payloadHash) {
-    if (payload.getAuthenticationFlows().isEmpty()) {
-      return false;
-    }
-    boolean configsExist =
-        payload.getAuthenticatorConfig().stream()
-            .allMatch(config -> realm.getAuthenticatorConfigByAlias(config.getAlias()) != null);
-    boolean flowsExist =
-        payload.getAuthenticationFlows().stream()
-            .allMatch(flow -> realm.getFlowByAlias(flow.getAlias()) != null);
-    boolean hashesMatch =
-        payload.getAuthenticationFlows().stream()
-            .allMatch(
-                flow -> payloadHash.equals(realm.getAttribute(hashAttributeKey(flow.getAlias()))));
-    return configsExist && flowsExist && hashesMatch;
+  private record ExecutionShape(
+      String authenticator,
+      boolean authenticatorFlow,
+      String flowAlias,
+      String authenticatorConfig,
+      int priority,
+      String requirement) {}
+
+  /** What the import writes for one flow; executions are in priority order. */
+  private record FlowShape(
+      String description, String providerId, boolean topLevel, List<ExecutionShape> executions) {}
+
+  private static final Comparator<ExecutionShape> EXECUTION_ORDER =
+      Comparator.comparingInt(ExecutionShape::priority).thenComparing(ExecutionShape::toString);
+
+  private static FlowShape shapeOf(AuthenticationFlowRepresentation flow) {
+    List<ExecutionShape> executions =
+        flow.getAuthenticationExecutions().stream()
+            .map(
+                e ->
+                    new ExecutionShape(
+                        e.getAuthenticator(),
+                        e.isAuthenticatorFlow(),
+                        e.getFlowAlias(),
+                        e.getAuthenticatorConfig(),
+                        e.getPriority() == null ? 0 : e.getPriority(),
+                        e.getRequirement()))
+            .sorted(EXECUTION_ORDER)
+            .toList();
+    return new FlowShape(
+        flow.getDescription(), flow.getProviderId(), flow.isTopLevel(), executions);
   }
 
-  private static void recordPayloadHash(
-      RealmModel realm, AuthenticationFlowPayload payload, String payloadHash) {
-    for (AuthenticationFlowRepresentation flow : payload.getAuthenticationFlows()) {
-      realm.setAttribute(hashAttributeKey(flow.getAlias()), payloadHash);
-    }
-  }
-
-  /** Attribute names are capped at 255 characters and so are aliases, hence the alias is hashed. */
-  static String hashAttributeKey(String flowAlias) {
-    return HASH_ATTRIBUTE_PREFIX
-        + UUID.nameUUIDFromBytes(flowAlias.getBytes(StandardCharsets.UTF_8));
+  private static FlowShape shapeOf(RealmModel realm, AuthenticationFlowModel flow) {
+    List<ExecutionShape> executions =
+        realm
+            .getAuthenticationExecutionsStream(flow.getId())
+            .map(
+                e -> {
+                  AuthenticationFlowModel subflow =
+                      e.isAuthenticatorFlow() && e.getFlowId() != null
+                          ? realm.getAuthenticationFlowById(e.getFlowId())
+                          : null;
+                  AuthenticatorConfigModel config =
+                      e.getAuthenticatorConfig() == null
+                          ? null
+                          : realm.getAuthenticatorConfigById(e.getAuthenticatorConfig());
+                  return new ExecutionShape(
+                      e.getAuthenticator(),
+                      e.isAuthenticatorFlow(),
+                      subflow == null ? null : subflow.getAlias(),
+                      config == null ? null : config.getAlias(),
+                      e.getPriority(),
+                      e.getRequirement() == null ? null : e.getRequirement().name());
+                })
+            .sorted(EXECUTION_ORDER)
+            .toList();
+    return new FlowShape(
+        flow.getDescription(), flow.getProviderId(), flow.isTopLevel(), executions);
   }
 
   /**
-   * Upserts the configs by alias, then for every flow in the payload keeps (or creates) the flow
-   * row and rebuilds its executions from the payload. Flow ids are stable across replaces, so
+   * Aliases of the payload flows that are missing from the realm or differ from it. Compares the
+   * realm as it is now, so a flow edited in the console or through the admin API since the last
+   * import is detected and rewritten.
+   */
+  private static Set<String> changedFlows(RealmModel realm, AuthenticationFlowPayload payload) {
+    Set<String> changed = new LinkedHashSet<>();
+    for (AuthenticationFlowRepresentation flow : payload.getAuthenticationFlows()) {
+      AuthenticationFlowModel existing = realm.getFlowByAlias(flow.getAlias());
+      if (existing == null || !shapeOf(flow).equals(shapeOf(realm, existing))) {
+        changed.add(flow.getAlias());
+      }
+    }
+    return changed;
+  }
+
+  /** Aliases of the payload configs that are missing from the realm or have different values. */
+  private static Set<String> changedConfigs(RealmModel realm, AuthenticationFlowPayload payload) {
+    Set<String> changed = new LinkedHashSet<>();
+    for (AuthenticatorConfigRepresentation config : payload.getAuthenticatorConfig()) {
+      AuthenticatorConfigModel existing = realm.getAuthenticatorConfigByAlias(config.getAlias());
+      Map<String, String> wanted = config.getConfig() == null ? Map.of() : config.getConfig();
+      Map<String, String> actual =
+          existing == null || existing.getConfig() == null ? Map.of() : existing.getConfig();
+      if (existing == null || !wanted.equals(actual)) {
+        changed.add(config.getAlias());
+      }
+    }
+    return changed;
+  }
+
+  /**
+   * Upserts the changed configs by alias, then for every changed flow keeps (or creates) the flow
+   * row and rebuilds its executions from the payload. Flows in the payload that already match the
+   * realm are left alone. Flow ids are stable across replaces, so
    * bindings made outside this payload keep resolving. Subflows that hung off a replaced flow but
    * are not in the payload are deleted, unless a flow outside the payload also uses them; configs
    * are never deleted because other flows may share them.
@@ -603,8 +660,13 @@ public class AuthenticationFlowResource {
       KeycloakSession session,
       RealmModel realm,
       AuthenticationFlowPayload payload,
+      Set<String> changedConfigs,
+      Set<String> changedFlows,
       Map<String, List<String>> subflowParents) {
     for (AuthenticatorConfigRepresentation configRep : payload.getAuthenticatorConfig()) {
+      if (!changedConfigs.contains(configRep.getAlias())) {
+        continue;
+      }
       AuthenticatorConfigModel existing = realm.getAuthenticatorConfigByAlias(configRep.getAlias());
       if (existing == null) {
         realm.addAuthenticatorConfig(RepresentationToModel.toModel(configRep));
@@ -620,12 +682,16 @@ public class AuthenticationFlowResource {
     for (AuthenticationFlowRepresentation flowRep : payload.getAuthenticationFlows()) {
       payloadAliases.add(flowRep.getAlias());
       AuthenticationFlowModel existing = realm.getFlowByAlias(flowRep.getAlias());
-      if (existing != null) {
+      if (existing != null && changedFlows.contains(flowRep.getAlias())) {
         rebuiltIds.add(existing.getId());
       }
     }
 
-    for (AuthenticationFlowRepresentation flowRep : payload.getAuthenticationFlows()) {
+    List<AuthenticationFlowRepresentation> changed =
+        payload.getAuthenticationFlows().stream()
+            .filter(flowRep -> changedFlows.contains(flowRep.getAlias()))
+            .toList();
+    for (AuthenticationFlowRepresentation flowRep : changed) {
       AuthenticationFlowModel existing = realm.getFlowByAlias(flowRep.getAlias());
       if (existing == null) {
         AuthenticationFlowModel model = RepresentationToModel.toModel(flowRep);
@@ -639,7 +705,7 @@ public class AuthenticationFlowResource {
       }
     }
 
-    for (AuthenticationFlowRepresentation flowRep : payload.getAuthenticationFlows()) {
+    for (AuthenticationFlowRepresentation flowRep : changed) {
       AuthenticationFlowModel model = realm.getFlowByAlias(flowRep.getAlias());
       for (AuthenticationExecutionExportRepresentation exeRep :
           flowRep.getAuthenticationExecutions()) {

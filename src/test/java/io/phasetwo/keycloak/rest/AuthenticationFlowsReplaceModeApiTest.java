@@ -30,13 +30,16 @@ import io.restassured.response.Response;
 import jakarta.ws.rs.NotFoundException;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.keycloak.admin.client.resource.RealmResource;
 import org.keycloak.representations.idm.AuthenticationExecutionExportRepresentation;
+import org.keycloak.representations.idm.AuthenticationExecutionInfoRepresentation;
 import org.keycloak.representations.idm.AuthenticationFlowRepresentation;
 import org.keycloak.representations.idm.AuthenticatorConfigRepresentation;
 import org.keycloak.representations.idm.ClientRepresentation;
@@ -100,6 +103,118 @@ class AuthenticationFlowsReplaceModeApiTest extends AbstractTestBase {
     assertEquals(flows, realm.flows().getFlows().size());
     assertEquals(browserId, flowId(keycloak, REALM_NAME, BROWSER));
     assertEquals(executions, executionIds(keycloak, REALM_NAME, BROWSER));
+  }
+
+  @Test
+  void noOpDetection_comparesWithTheRealm_andStoresNothing() throws IOException {
+    Map<String, String> before = realm.toRepresentation().getAttributes();
+
+    assertEquals(200, post(load(V1)).statusCode());
+
+    assertEquals(before, realm.toRepresentation().getAttributes(), "no realm attributes written");
+  }
+
+  @Test
+  void identicalRepost_withExecutionsInAnotherOrder_isNoOp() throws IOException {
+    assertEquals(200, post(load(V1)).statusCode());
+    AuthenticationFlowPayload reordered = load(V1);
+    reordered
+        .getAuthenticationFlows()
+        .forEach(
+            f -> {
+              List<AuthenticationExecutionExportRepresentation> executions =
+                  new ArrayList<>(f.getAuthenticationExecutions());
+              Collections.reverse(executions);
+              f.setAuthenticationExecutions(executions);
+            });
+    Collections.reverse(reordered.getAuthenticationFlows());
+
+    assertEquals(RESULT_UNCHANGED, post(reordered).header(RESULT_HEADER));
+  }
+
+  @Test
+  void flowEditedOutsideTheImport_isDetected_andRewritten() throws IOException {
+    assertEquals(200, post(load(V1)).statusCode());
+    AuthenticationExecutionInfoRepresentation spnego =
+        realm.flows().getExecutions(BROWSER).stream()
+            .filter(e -> "auth-spnego".equals(e.getProviderId()))
+            .findFirst()
+            .orElseThrow();
+    spnego.setRequirement("ALTERNATIVE");
+    realm.flows().updateExecutions(BROWSER, spnego);
+
+    Response response = post(load(V1));
+
+    assertEquals(RESULT_APPLIED, response.header(RESULT_HEADER));
+    assertEquals("DISABLED", requirementOf(BROWSER, "auth-spnego"));
+    assertEquals(RESULT_UNCHANGED, post(load(V1)).header(RESULT_HEADER));
+  }
+
+  @Test
+  void configEditedOutsideTheImport_isDetected_andRewritten() throws IOException {
+    assertEquals(200, post(load(V1)).statusCode());
+    String alias = load(V1).getAuthenticatorConfig().getFirst().getAlias();
+    AuthenticatorConfigRepresentation config =
+        realm.flows().getAuthenticatorConfig(configId(alias));
+    Map<String, String> original = new TreeMap<>(config.getConfig());
+    config.getConfig().replaceAll((k, v) -> "edited");
+    realm.flows().updateAuthenticatorConfig(config.getId(), config);
+
+    Response response = post(load(V1));
+
+    assertEquals(RESULT_APPLIED, response.header(RESULT_HEADER));
+    assertEquals(
+        original, new TreeMap<>(realm.flows().getAuthenticatorConfig(configId(alias)).getConfig()));
+    assertEquals(RESULT_UNCHANGED, post(load(V1)).header(RESULT_HEADER));
+  }
+
+  @Test
+  void onlyTheChangedFlowIsRewritten() throws IOException {
+    assertEquals(200, post(load(V1)).statusCode());
+    List<String> browserTop = topLevelExecutionIds(BROWSER);
+    List<String> formsTop = topLevelExecutionIds(BROWSER_FORMS);
+    AuthenticationFlowPayload payload = load(V1);
+    AuthenticationFlowRepresentation otp = flow(payload, BROWSER_OTP);
+    otp.setAuthenticationExecutions(
+        new ArrayList<>(
+            otp.getAuthenticationExecutions().stream()
+                .filter(e -> !"auth-recovery-authn-code-form".equals(e.getAuthenticator()))
+                .toList()));
+
+    Response response = post(payload);
+
+    assertEquals(RESULT_APPLIED, response.header(RESULT_HEADER));
+    assertEquals(
+        List.of("conditional-user-configured", "auth-otp-form"),
+        authenticators(keycloak, REALM_NAME, BROWSER_OTP));
+    assertEquals(browserTop, topLevelExecutionIds(BROWSER), "unchanged parent is not rewritten");
+    assertEquals(formsTop, topLevelExecutionIds(BROWSER_FORMS));
+  }
+
+  private List<String> topLevelExecutionIds(String alias) {
+    return realm.flows().getExecutions(alias).stream()
+        .filter(e -> e.getLevel() == 0)
+        .map(AuthenticationExecutionInfoRepresentation::getId)
+        .toList();
+  }
+
+  private String requirementOf(String flowAlias, String providerId) {
+    return realm.flows().getExecutions(flowAlias).stream()
+        .filter(e -> providerId.equals(e.getProviderId()))
+        .map(AuthenticationExecutionInfoRepresentation::getRequirement)
+        .findFirst()
+        .orElseThrow();
+  }
+
+  private String configId(String alias) {
+    return realm.flows().getFlows().stream()
+        .flatMap(f -> realm.flows().getExecutions(f.getAlias()).stream())
+        .filter(e -> e.getAuthenticationConfig() != null)
+        .map(AuthenticationExecutionInfoRepresentation::getAuthenticationConfig)
+        .distinct()
+        .filter(id -> alias.equals(realm.flows().getAuthenticatorConfig(id).getAlias()))
+        .findFirst()
+        .orElseThrow(() -> new AssertionError("No config " + alias));
   }
 
   @Test
