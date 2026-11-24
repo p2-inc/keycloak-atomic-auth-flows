@@ -16,5 +16,9 @@ services:
       # Bootstrap admin created in the master realm on first start.
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
       KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      # Default import mode for the extension: `versioned` (hash-prefixed, keeps
+      # history) or `replace` (plain aliases, overwrite in place). A request can
+      # still override it with ?mode=... Uncomment to make replace the default.
+      # KC_SPI_ADMIN_REALM_RESTAPI_EXTENSION_AUTHENTICATION_FLOW_MODE: replace
     ports:
       - "8080:8080"
